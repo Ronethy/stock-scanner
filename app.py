@@ -61,7 +61,7 @@ elif symbol_source == "Gesamte NASDAQ":
 st.sidebar.header("Scanner Einstellungen")
 lookback = st.sidebar.number_input("Lookback Perioden (für Volumen)", min_value=5, max_value=100, value=20)
 min_price = st.sidebar.number_input("Minimaler Preis ($)", min_value=0.0, value=2.0)
-max_price = st.sidebar.number_input("Maximaler Preis ($)", min_value=10_000.0, value=20.0)
+max_price = st.sidebar.number_input("Maximaler Preis ($)", min_value=0.0, value=20.0)
 min_rvol = st.sidebar.number_input("Minimales RVOL (Relatives Volumen)", min_value=0.5, value=2.0)
 
 # Refresh Button
@@ -75,13 +75,20 @@ results = []
 
 if symbols:
     end = datetime.now()
-    start = end - timedelta(days=7)  # wir brauchen einige Tage für 1-Minuten Daten
+    start = end - timedelta(days=7)  # wir brauchen einige Tage für Intraday-Daten
     
     progress = st.progress(0)
+    st.sidebar.write(f"Scanne {len(symbols)} Symbole...")
+
     for i, sym in enumerate(symbols):
         try:
+            # Versuche 1m-Daten, sonst fallback auf 5m
             data = yf.download(sym, start=start, end=end, interval="1m", progress=False)
             if data.empty:
+                data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
+            
+            if data.empty:
+                st.sidebar.write(f"{sym}: ❌ keine Daten")
                 continue
 
             last_close = data["Close"].iloc[-1]
@@ -89,6 +96,7 @@ if symbols:
             current_vol = data["Volume"].iloc[-1]
             rvol = current_vol / avg_vol if avg_vol > 0 else 0
 
+            # Filter anwenden
             if min_price <= last_close <= max_price and rvol >= min_rvol:
                 results.append({
                     "Symbol": sym,
@@ -97,7 +105,11 @@ if symbols:
                     "Letztes Volumen": int(current_vol),
                     "Ø Volumen": int(avg_vol)
                 })
+            
+            st.sidebar.write(f"{sym}: OK (Preis {round(last_close,2)} | RVOL {round(rvol,2)})")
+
         except Exception as e:
+            st.sidebar.write(f"{sym}: Fehler ({e})")
             continue
 
         progress.progress((i + 1) / len(symbols))
@@ -105,10 +117,13 @@ if symbols:
 # --------------------------
 # Ergebnisse anzeigen
 # --------------------------
+st.subheader("📊 Scan-Ergebnisse")
+
 if results:
     df_results = pd.DataFrame(results)
     df_results = df_results.sort_values(by="RVOL", ascending=False)
-    st.subheader("📊 Gefilterte Aktien")
+    st.write(f"Gefundene Treffer: **{len(df_results)}** von insgesamt {len(symbols)} gescannten Symbolen")
     st.dataframe(df_results, use_container_width=True)
 else:
-    st.info("Keine passenden Aktien gefunden – bitte Filter anpassen oder andere Symbol-Liste wählen.")
+    st.warning(f"Keine Aktien erfüllen aktuell die Kriterien. Gescannt: {len(symbols)} Symbole.")
+    st.info("👉 Tipp: Filter lockern (z. B. RVOL auf 1.0 setzen oder Preisspanne erhöhen)")
