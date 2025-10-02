@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # --------------------------
 st.set_page_config(page_title="Aktien Breakout Scanner", layout="wide")
 
-st.title("📈 Aktien Breakout Scanner (NASDAQ / S&P500)")
+st.title("📈 Aktien Breakout Scanner ")
 
 # --------------------------
 # Sidebar: Symbol-Quelle
@@ -66,7 +66,7 @@ min_rvol = st.sidebar.number_input("Minimales RVOL (Relatives Volumen)", min_val
 
 # Refresh Button
 if st.sidebar.button("🔄 Daten neu laden"):
-    st.experimental_rerun()
+    st.rerun()
 
 # --------------------------
 # Daten abrufen & Filtern
