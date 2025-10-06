@@ -64,6 +64,55 @@ if st.sidebar.button("🔄 Daten neu laden"):
     st.rerun()
 
 # --------------------------
+# Hilfsfunktion: sicheres Laden der Spalten
+# --------------------------
+def extract_columns(data, sym):
+    """
+    Extrahiert Close- und Volume-Daten unabhängig davon,
+    ob sie Single- oder MultiIndex sind.
+    """
+    close = None
+    volume = None
+
+    # Debug: Spaltennamen anzeigen
+    st.sidebar.write(f"{sym}: Spalten -> {list(data.columns)}")
+
+    try:
+        # MultiIndex mit Symbol
+        if isinstance(data.columns, pd.MultiIndex):
+            if (sym, "Close") in data.columns:
+                close = data[(sym, "Close")]
+            elif ("Close",) in data.columns:
+                close = data[("Close",)]
+            else:
+                # Letzter Versuch: "Adj Close"
+                try:
+                    close = data[(sym, "Adj Close")]
+                except Exception:
+                    pass
+
+            if (sym, "Volume") in data.columns:
+                volume = data[(sym, "Volume")]
+            elif ("Volume",) in data.columns:
+                volume = data[("Volume",)]
+
+        # Einfache Spalten
+        else:
+            if "Close" in data.columns:
+                close = data["Close"]
+            elif "Adj Close" in data.columns:
+                close = data["Adj Close"]
+
+            if "Volume" in data.columns:
+                volume = data["Volume"]
+
+    except Exception as e:
+        st.sidebar.write(f"{sym}: ❌ Fehler beim Spaltenzugriff ({e})")
+
+    return close, volume
+
+
+# --------------------------
 # Daten abrufen & Filtern
 # --------------------------
 results = []
@@ -71,14 +120,12 @@ results = []
 if symbols:
     end = datetime.now()
     start = end - timedelta(days=7)
-
     progress = st.progress(0)
     st.sidebar.write(f"Scanne {len(symbols)} Symbole...")
 
     for i, sym in enumerate(symbols):
         try:
             data = yf.download(sym, start=start, end=end, interval="1m", progress=False)
-
             if data.empty:
                 data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
 
@@ -86,31 +133,12 @@ if symbols:
                 st.sidebar.write(f"{sym}: ❌ Keine Daten")
                 continue
 
-            # Prüfen auf MultiIndex (manchmal mehrere Ebenen)
-            if isinstance(data.columns, pd.MultiIndex):
-                if (sym, "Close") in data.columns:
-                    close = data[(sym, "Close")]
-                    volume = data[(sym, "Volume")]
-                else:
-                    close = data.xs("Close", axis=1, level=-1).iloc[:, 0]
-                    volume = data.xs("Volume", axis=1, level=-1).iloc[:, 0]
-            else:
-                # Fallbacks prüfen
-                if "Close" in data.columns:
-                    close = data["Close"]
-                elif "Adj Close" in data.columns:
-                    close = data["Adj Close"]
-                else:
-                    st.sidebar.write(f"{sym}: ⚠️ Keine 'Close'-Daten")
-                    continue
+            close, volume = extract_columns(data, sym)
 
-                if "Volume" in data.columns:
-                    volume = data["Volume"]
-                else:
-                    st.sidebar.write(f"{sym}: ⚠️ Keine 'Volume'-Daten")
-                    continue
+            if close is None or volume is None:
+                st.sidebar.write(f"{sym}: ⚠️ Keine gültigen Spalten (Close/Volume)")
+                continue
 
-            # Bereinigen
             data = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
             if data.empty:
                 st.sidebar.write(f"{sym}: ⚠️ Keine gültigen Werte")
@@ -121,7 +149,6 @@ if symbols:
             current_vol = float(data["Volume"].iloc[-1])
             rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
 
-            # Filter anwenden
             if min_price <= last_close <= max_price and rvol >= min_rvol:
                 results.append({
                     "Symbol": sym,
@@ -134,7 +161,7 @@ if symbols:
             st.sidebar.write(f"{sym}: ✅ OK (Preis {round(last_close,2)} | RVOL {round(rvol,2)})")
 
         except Exception as e:
-            st.sidebar.write(f"{sym}: Fehler ({str(e)[:80]})")
+            st.sidebar.write(f"{sym}: ❌ Fehler ({str(e)[:100]})")
 
         progress.progress((i + 1) / len(symbols))
 
