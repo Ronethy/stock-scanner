@@ -64,47 +64,43 @@ if st.sidebar.button("🔄 Daten neu laden"):
     st.rerun()
 
 # --------------------------
-# Hilfsfunktion: sicheres Laden der Spalten
+# Hilfsfunktion: robustes Spalten-Mapping
 # --------------------------
 def extract_columns(data, sym):
     """
-    Extrahiert Close- und Volume-Daten unabhängig davon,
-    ob sie Single- oder MultiIndex sind.
+    Liefert Close- und Volume-Spalten unabhängig von MultiIndex-Reihenfolge.
     """
     close = None
     volume = None
-
-    # Debug: Spaltennamen anzeigen
-    st.sidebar.write(f"{sym}: Spalten -> {list(data.columns)}")
+    st.sidebar.write(f"{sym}: Spalten → {list(data.columns)}")
 
     try:
-        # MultiIndex mit Symbol
         if isinstance(data.columns, pd.MultiIndex):
+            # alle Varianten prüfen
             if (sym, "Close") in data.columns:
                 close = data[(sym, "Close")]
+            elif ("Close", sym) in data.columns:
+                close = data[("Close", sym)]
             elif ("Close",) in data.columns:
                 close = data[("Close",)]
-            else:
-                # Letzter Versuch: "Adj Close"
-                try:
-                    close = data[(sym, "Adj Close")]
-                except Exception:
-                    pass
-
-            if (sym, "Volume") in data.columns:
-                volume = data[(sym, "Volume")]
-            elif ("Volume",) in data.columns:
-                volume = data[("Volume",)]
-
-        # Einfache Spalten
-        else:
-            if "Close" in data.columns:
+            elif "Close" in data.columns:
                 close = data["Close"]
             elif "Adj Close" in data.columns:
                 close = data["Adj Close"]
 
-            if "Volume" in data.columns:
+            if (sym, "Volume") in data.columns:
+                volume = data[(sym, "Volume")]
+            elif ("Volume", sym) in data.columns:
+                volume = data[("Volume", sym)]
+            elif ("Volume",) in data.columns:
+                volume = data[("Volume",)]
+            elif "Volume" in data.columns:
                 volume = data["Volume"]
+
+        else:
+            # einfache Spaltenstruktur
+            close = data.get("Close", data.get("Adj Close"))
+            volume = data.get("Volume")
 
     except Exception as e:
         st.sidebar.write(f"{sym}: ❌ Fehler beim Spaltenzugriff ({e})")
@@ -134,19 +130,18 @@ if symbols:
                 continue
 
             close, volume = extract_columns(data, sym)
-
             if close is None or volume is None:
-                st.sidebar.write(f"{sym}: ⚠️ Keine gültigen Spalten (Close/Volume)")
+                st.sidebar.write(f"{sym}: ⚠️ Keine gültigen Spalten")
                 continue
 
-            data = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
-            if data.empty:
+            df = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
+            if df.empty:
                 st.sidebar.write(f"{sym}: ⚠️ Keine gültigen Werte")
                 continue
 
-            last_close = float(data["Close"].iloc[-1])
-            avg_vol = float(data["Volume"].iloc[-lookback:].mean())
-            current_vol = float(data["Volume"].iloc[-1])
+            last_close = float(df["Close"].iloc[-1])
+            avg_vol = float(df["Volume"].iloc[-lookback:].mean())
+            current_vol = float(df["Volume"].iloc[-1])
             rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
 
             if min_price <= last_close <= max_price and rvol >= min_rvol:
