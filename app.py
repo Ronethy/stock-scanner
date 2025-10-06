@@ -10,7 +10,7 @@ import numpy as np
 # Einstellungen
 # --------------------------
 st.set_page_config(page_title="Aktien Breakout Scanner", layout="wide")
-st.title("📈 Aktien Breakout Scanner (NASDAQ / S&P500)")
+st.title("📈 Aktien Breakout Scanner ")
 
 # --------------------------
 # Sidebar: Symbol-Quelle
@@ -75,8 +75,7 @@ results = []
 
 if symbols:
     end = datetime.now()
-    start = end - timedelta(days=7)  # wir brauchen einige Tage für Intraday-Daten
-    
+    start = end - timedelta(days=7)
     progress = st.progress(0)
     st.sidebar.write(f"Scanne {len(symbols)} Symbole...")
 
@@ -86,24 +85,38 @@ if symbols:
             if data.empty:
                 data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
             
-            if data.empty or "Close" not in data.columns:
+            if data.empty:
                 st.sidebar.write(f"{sym}: ❌ keine Daten")
                 continue
 
-            # NaN entfernen
-            data = data.dropna(subset=["Close", "Volume"])
+            # Falls MultiIndex (mehrdimensionale Spalten)
+            if isinstance(data.columns, pd.MultiIndex):
+                if (sym, "Close") in data.columns:
+                    close_col = data[(sym, "Close")]
+                    vol_col = data[(sym, "Volume")]
+                else:
+                    # Fallback: erste Spalte "Close" und "Volume" suchen
+                    close_col = data.xs("Close", axis=1, level=-1)
+                    vol_col = data.xs("Volume", axis=1, level=-1)
+                    close_col = close_col.iloc[:, 0]
+                    vol_col = vol_col.iloc[:, 0]
+            else:
+                close_col = data["Close"]
+                vol_col = data["Volume"]
+
+            # Daten bereinigen
+            data = pd.DataFrame({"Close": close_col, "Volume": vol_col}).dropna()
             if data.empty:
-                st.sidebar.write(f"{sym}: ⚠️ nur ungültige Werte")
+                st.sidebar.write(f"{sym}: ⚠️ keine gültigen Werte")
                 continue
 
-            # letzten gültigen Schlusskurs holen
             last_close = float(data["Close"].iloc[-1])
             avg_vol = float(data["Volume"].iloc[-lookback:].mean())
             current_vol = float(data["Volume"].iloc[-1])
             rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
 
             # Filter anwenden
-            if (last_close >= min_price) and (last_close <= max_price) and (rvol >= min_rvol):
+            if (min_price <= last_close <= max_price) and (rvol >= min_rvol):
                 results.append({
                     "Symbol": sym,
                     "Preis": round(last_close, 2),
