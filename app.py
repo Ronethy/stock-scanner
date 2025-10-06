@@ -4,13 +4,13 @@ import yfinance as yf
 import requests
 import io
 from datetime import datetime, timedelta
+import numpy as np
 
 # --------------------------
 # Einstellungen
 # --------------------------
 st.set_page_config(page_title="Aktien Breakout Scanner", layout="wide")
-
-st.title("📈 Aktien Breakout Scanner ")
+st.title("📈 Aktien Breakout Scanner (NASDAQ / S&P500)")
 
 # --------------------------
 # Sidebar: Symbol-Quelle
@@ -82,22 +82,28 @@ if symbols:
 
     for i, sym in enumerate(symbols):
         try:
-            # Versuche 1m-Daten, sonst fallback auf 5m
             data = yf.download(sym, start=start, end=end, interval="1m", progress=False)
             if data.empty:
                 data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
             
-            if data.empty:
+            if data.empty or "Close" not in data.columns:
                 st.sidebar.write(f"{sym}: ❌ keine Daten")
                 continue
 
-            last_close = data["Close"].iloc[-1]
-            avg_vol = data["Volume"].iloc[-lookback:].mean()
-            current_vol = data["Volume"].iloc[-1]
-            rvol = current_vol / avg_vol if avg_vol > 0 else 0
+            # NaN entfernen
+            data = data.dropna(subset=["Close", "Volume"])
+            if data.empty:
+                st.sidebar.write(f"{sym}: ⚠️ nur ungültige Werte")
+                continue
+
+            # letzten gültigen Schlusskurs holen
+            last_close = float(data["Close"].iloc[-1])
+            avg_vol = float(data["Volume"].iloc[-lookback:].mean())
+            current_vol = float(data["Volume"].iloc[-1])
+            rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
 
             # Filter anwenden
-            if min_price <= last_close <= max_price and rvol >= min_rvol:
+            if (last_close >= min_price) and (last_close <= max_price) and (rvol >= min_rvol):
                 results.append({
                     "Symbol": sym,
                     "Preis": round(last_close, 2),
@@ -109,7 +115,7 @@ if symbols:
             st.sidebar.write(f"{sym}: OK (Preis {round(last_close,2)} | RVOL {round(rvol,2)})")
 
         except Exception as e:
-            st.sidebar.write(f"{sym}: Fehler ({e})")
+            st.sidebar.write(f"{sym}: Fehler ({str(e)[:80]})")
             continue
 
         progress.progress((i + 1) / len(symbols))
