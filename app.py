@@ -3,11 +3,11 @@ import pandas as pd
 import yfinance as yf
 import requests
 import io
-from datetime import datetime, timedelta
 import time
+from datetime import datetime, timedelta
 
 # --------------------------
-# Einstellungen
+# App-Einstellungen
 # --------------------------
 st.set_page_config(page_title="📈 Aktien Breakout Scanner", layout="wide")
 st.title("📊 Aktien Breakout Scanner (NASDAQ / S&P500)")
@@ -65,42 +65,25 @@ if st.sidebar.button("🔄 Daten neu laden"):
     st.rerun()
 
 # --------------------------
-# Hilfsfunktion: robustes Spalten-Mapping
+# Session-State für Monitor
 # --------------------------
-def extract_columns(data, sym):
-    close = None
-    volume = None
-    try:
-        if isinstance(data.columns, pd.MultiIndex):
-            if (sym, "Close") in data.columns:
-                close = data[(sym, "Close")]
-            elif ("Close", sym) in data.columns:
-                close = data[("Close", sym)]
-            elif ("Close",) in data.columns:
-                close = data[("Close",)]
-            elif "Close" in data.columns:
-                close = data["Close"]
-            elif "Adj Close" in data.columns:
-                close = data["Adj Close"]
+if "monitor" not in st.session_state:
+    st.session_state.monitor = []
 
-            if (sym, "Volume") in data.columns:
-                volume = data[(sym, "Volume")]
-            elif ("Volume", sym) in data.columns:
-                volume = data[("Volume", sym)]
-            elif ("Volume",) in data.columns:
-                volume = data[("Volume",)]
-            elif "Volume" in data.columns:
-                volume = data["Volume"]
-        else:
-            close = data.get("Close", data.get("Adj Close"))
-            volume = data.get("Volume")
-    except Exception:
-        pass
+# --------------------------
+# Hilfsfunktion: Spalten finden
+# --------------------------
+def extract_columns(data):
+    if isinstance(data.columns, pd.MultiIndex):
+        close = data.xs("Close", level=1, axis=1, drop_level=False).iloc[:, 0]
+        volume = data.xs("Volume", level=1, axis=1, drop_level=False).iloc[:, 0]
+    else:
+        close = data["Close"] if "Close" in data else data["Adj Close"]
+        volume = data["Volume"]
     return close, volume
 
-
 # --------------------------
-# Daten abrufen & Filtern
+# Daten abrufen & filtern
 # --------------------------
 results = []
 
@@ -112,24 +95,18 @@ if symbols:
 
     for i, sym in enumerate(symbols):
         try:
-            data = yf.download(sym, start=start, end=end, interval="1m", progress=False)
-            if data.empty:
-                data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
-
+            data = yf.download(sym, start=start, end=end, interval="1h", progress=False, auto_adjust=False)
             if data.empty:
                 continue
 
-            close, volume = extract_columns(data, sym)
-            if close is None or volume is None:
-                continue
-
+            close, volume = extract_columns(data)
             df = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
             if df.empty:
                 continue
 
-            last_close = float(df["Close"].iloc[-1])
-            avg_vol = float(df["Volume"].iloc[-lookback:].mean())
-            current_vol = float(df["Volume"].iloc[-1])
+            last_close = df["Close"].iloc[-1]
+            avg_vol = df["Volume"].iloc[-lookback:].mean()
+            current_vol = df["Volume"].iloc[-1]
             rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
 
             if min_price <= last_close <= max_price and rvol >= min_rvol:
@@ -141,8 +118,8 @@ if symbols:
                     "Ø Volumen": int(avg_vol)
                 })
 
-        except Exception:
-            pass
+        except Exception as e:
+            st.sidebar.write(f"{sym}: ❌ Fehler ({str(e)[:100]})")
 
         progress.progress((i + 1) / len(symbols))
 
@@ -153,63 +130,58 @@ st.subheader("📊 Scan-Ergebnisse")
 
 if results:
     df = pd.DataFrame(results).sort_values(by="RVOL", ascending=False)
-    st.write(f"Gefundene Treffer: **{len(df)}** von insgesamt {len(symbols)} gescannten Symbolen")
-    st.dataframe(df, use_container_width=True)
-    st.session_state["monitor_symbols"] = df["Symbol"].tolist()
+    st.write(f"Gefundene Treffer: **{len(df)}** von {len(symbols)} gescannten Symbolen")
+
+    # Heatmap mit Farbverlauf
+    def color_rvol(val):
+        color = "green" if val >= 2 else "orange" if val >= 1 else "red"
+        return f"background-color: {color}; color: white; font-weight: bold;"
+
+    st.dataframe(df.style.applymap(color_rvol, subset=["RVOL"]), width="stretch")
+
+    # Buttons für Monitor
+    for sym in df["Symbol"]:
+        if st.button(f"📈 {sym} zum Monitor hinzufügen"):
+            if sym not in st.session_state.monitor:
+                st.session_state.monitor.append(sym)
+                st.success(f"{sym} wurde dem Monitor hinzugefügt ✅")
+                st.rerun()
 else:
     st.warning("Keine Aktien erfüllen aktuell die Kriterien.")
-    st.info("👉 Filter anpassen oder manuell Symbole unten eingeben.")
-    st.session_state["monitor_symbols"] = []
 
-# ============================================================
-# 📈 MONITORING-FUNKTION – Echtzeitüberwachung der Treffer
-# ============================================================
-st.markdown("---")
-st.header("📡 Live Monitoring der gefundenen Aktien")
+# --------------------------
+# Live-Monitor
+# --------------------------
+st.subheader("🖥️ Echtzeit-Monitor")
 
-# Manuelles Hinzufügen möglich
-manual_symbols = st.text_input(
-    "Symbole manuell hinzufügen (Komma getrennt)", 
-    value=",".join(st.session_state.get("monitor_symbols", []))
-)
+if st.session_state.monitor:
+    refresh_rate = st.slider("Aktualisierungsrate (Sekunden)", 10, 120, 30)
+    monitor_data = []
 
-if st.button("✅ Symbole übernehmen"):
-    st.session_state["monitor_symbols"] = [s.strip().upper() for s in manual_symbols.split(",") if s.strip()]
-    st.success("Symbole für Monitoring aktualisiert!")
-    st.rerun()
-
-monitor_symbols = st.session_state.get("monitor_symbols", [])
-if not monitor_symbols:
-    st.info("⚠️ Keine Symbole für das Monitoring vorhanden.")
-else:
-    refresh_rate = st.slider("⏱ Aktualisierung alle (Sekunden):", 30, 300, 60)
-    st.write(f"Aktuell überwachte Symbole: {', '.join(monitor_symbols)}")
-
-    data_rows = []
-    for sym in monitor_symbols:
+    for sym in st.session_state.monitor:
         try:
-            data = yf.download(sym, period="1d", interval="1m", progress=False)
-            if data is None or len(data) < 2:
+            data = yf.download(sym, period="1d", interval="1m", progress=False, auto_adjust=False)
+            if data.empty:
                 continue
-            last, prev = data.iloc[-1], data.iloc[-2]
-            price_change = ((last["Close"] - prev["Close"]) / prev["Close"]) * 100
-            color = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪"
-            data_rows.append({
-                "Symbol": sym,
-                "Letzter Preis": round(last["Close"], 2),
-                "Veränderung (%)": round(price_change, 2),
-                "Volumen": int(last["Volume"]),
-                "Trend": color
-            })
-        except Exception:
-            continue
+            last = data["Close"].iloc[-1]
+            prev = data["Close"].iloc[-2]
+            change = ((last - prev) / prev) * 100
+            monitor_data.append({"Symbol": sym, "Preis": round(last, 2), "Δ%": round(change, 2)})
+        except Exception as e:
+            st.write(f"{sym}: ❌ Fehler ({e})")
 
-    if data_rows:
-        dfm = pd.DataFrame(data_rows)
-        st.dataframe(dfm, use_container_width=True)
-        st.caption(f"Letztes Update: {datetime.now().strftime('%H:%M:%S')}")
+    if monitor_data:
+        dfm = pd.DataFrame(monitor_data)
+        def color_change(val):
+            color = "green" if val > 0 else "red" if val < 0 else "gray"
+            return f"background-color: {color}; color: white; font-weight: bold;"
+
+        st.dataframe(dfm.style.applymap(color_change, subset=["Δ%"]), width="stretch")
     else:
-        st.warning("Keine Monitoring-Daten verfügbar.")
+        st.info("Keine aktuellen Daten verfügbar.")
 
     if st.button("🔄 Jetzt aktualisieren"):
         st.rerun()
+
+else:
+    st.info("Noch keine Symbole im Monitor. Füge oben welche hinzu mit dem Button „📈 zum Monitor hinzufügen“.")
