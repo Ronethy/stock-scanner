@@ -3,7 +3,6 @@ import pandas as pd
 import yfinance as yf
 import requests
 import io
-import time
 from datetime import datetime, timedelta
 
 # --------------------------
@@ -71,15 +70,33 @@ if "monitor" not in st.session_state:
     st.session_state.monitor = []
 
 # --------------------------
-# Hilfsfunktion: Spalten finden
+# Hilfsfunktion: Spalten finden (robust)
 # --------------------------
 def extract_columns(data):
-    if isinstance(data.columns, pd.MultiIndex):
-        close = data.xs("Close", level=1, axis=1, drop_level=False).iloc[:, 0]
-        volume = data.xs("Volume", level=1, axis=1, drop_level=False).iloc[:, 0]
-    else:
-        close = data["Close"] if "Close" in data else data["Adj Close"]
-        volume = data["Volume"]
+    """
+    Extrahiert Close- und Volume-Spalten aus yfinance-DataFrame.
+    Funktioniert mit einfachem oder MultiIndex.
+    """
+    close, volume = None, None
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            # Alle möglichen Varianten prüfen
+            for col in data.columns:
+                if "close" in str(col).lower():
+                    close = data[col]
+                if "volume" in str(col).lower():
+                    volume = data[col]
+        else:
+            if "Close" in data.columns:
+                close = data["Close"]
+            elif "Adj Close" in data.columns:
+                close = data["Adj Close"]
+            if "Volume" in data.columns:
+                volume = data["Volume"]
+
+    except Exception as e:
+        st.sidebar.warning(f"Spaltenproblem: {e}")
+
     return close, volume
 
 # --------------------------
@@ -100,6 +117,10 @@ if symbols:
                 continue
 
             close, volume = extract_columns(data)
+            if close is None or volume is None:
+                st.sidebar.write(f"{sym}: ⚠️ Keine Close/Volume-Daten")
+                continue
+
             df = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
             if df.empty:
                 continue
@@ -119,7 +140,7 @@ if symbols:
                 })
 
         except Exception as e:
-            st.sidebar.write(f"{sym}: ❌ Fehler ({str(e)[:100]})")
+            st.sidebar.write(f"{sym}: ❌ Fehler ({str(e)[:80]})")
 
         progress.progress((i + 1) / len(symbols))
 
@@ -163,8 +184,9 @@ if st.session_state.monitor:
             data = yf.download(sym, period="1d", interval="1m", progress=False, auto_adjust=False)
             if data.empty:
                 continue
-            last = data["Close"].iloc[-1]
-            prev = data["Close"].iloc[-2]
+            close = data["Close"] if "Close" in data else data["Adj Close"]
+            last = close.iloc[-1]
+            prev = close.iloc[-2]
             change = ((last - prev) / prev) * 100
             monitor_data.append({"Symbol": sym, "Preis": round(last, 2), "Δ%": round(change, 2)})
         except Exception as e:
@@ -182,6 +204,5 @@ if st.session_state.monitor:
 
     if st.button("🔄 Jetzt aktualisieren"):
         st.rerun()
-
 else:
     st.info("Noch keine Symbole im Monitor. Füge oben welche hinzu mit dem Button „📈 zum Monitor hinzufügen“.")
