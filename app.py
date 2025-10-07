@@ -98,6 +98,7 @@ def extract_columns(data, sym):
         pass
     return close, volume
 
+
 # --------------------------
 # Daten abrufen & Filtern
 # --------------------------
@@ -156,8 +157,9 @@ if results:
     st.dataframe(df, use_container_width=True)
     st.session_state["monitor_symbols"] = df["Symbol"].tolist()
 else:
-    st.warning(f"Keine Aktien erfüllen aktuell die Kriterien. Gescannt: {len(symbols)} Symbole.")
-    st.info("👉 Tipp: Filter lockern (z. B. RVOL auf 1.0 setzen oder Preisspanne erhöhen)")
+    st.warning("Keine Aktien erfüllen aktuell die Kriterien.")
+    st.info("👉 Filter anpassen oder manuell Symbole unten eingeben.")
+    st.session_state["monitor_symbols"] = []
 
 # ============================================================
 # 📈 MONITORING-FUNKTION – Echtzeitüberwachung der Treffer
@@ -165,10 +167,21 @@ else:
 st.markdown("---")
 st.header("📡 Live Monitoring der gefundenen Aktien")
 
-if "monitor_symbols" not in st.session_state or not st.session_state["monitor_symbols"]:
-    st.info("⚠️ Noch keine Treffer vorhanden. Bitte zuerst den Scanner ausführen.")
+# Manuelles Hinzufügen möglich
+manual_symbols = st.text_input(
+    "Symbole manuell hinzufügen (Komma getrennt)", 
+    value=",".join(st.session_state.get("monitor_symbols", []))
+)
+
+if st.button("✅ Symbole übernehmen"):
+    st.session_state["monitor_symbols"] = [s.strip().upper() for s in manual_symbols.split(",") if s.strip()]
+    st.success("Symbole für Monitoring aktualisiert!")
+    st.rerun()
+
+monitor_symbols = st.session_state.get("monitor_symbols", [])
+if not monitor_symbols:
+    st.info("⚠️ Keine Symbole für das Monitoring vorhanden.")
 else:
-    monitor_symbols = st.session_state["monitor_symbols"]
     refresh_rate = st.slider("⏱ Aktualisierung alle (Sekunden):", 30, 300, 60)
     st.write(f"Aktuell überwachte Symbole: {', '.join(monitor_symbols)}")
 
@@ -199,7 +212,4 @@ else:
         st.warning("Keine Monitoring-Daten verfügbar.")
 
     if st.button("🔄 Jetzt aktualisieren"):
-        st.experimental_rerun()
-    else:
-        time.sleep(refresh_rate)
-        st.experimental_rerun()
+        st.rerun()
