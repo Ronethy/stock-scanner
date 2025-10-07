@@ -1,150 +1,205 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
+import requests
+import io
 from datetime import datetime, timedelta
 import time
 
-# ------------------------------------------------------
-# Streamlit Setup
-# ------------------------------------------------------
-st.set_page_config(page_title="Stock Scanner & Monitor", layout="wide")
+# --------------------------
+# Einstellungen
+# --------------------------
+st.set_page_config(page_title="📈 Aktien Breakout Scanner", layout="wide")
+st.title("📊 Aktien Breakout Scanner (NASDAQ / S&P500)")
 
-# ------------------------------------------------------
-# Utility: Flatten MultiIndex Columns
-# ------------------------------------------------------
-def flatten_columns(df):
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] if c[0] else c[1] for c in df.columns]
-    return df
+# --------------------------
+# Sidebar: Symbol-Quelle
+# --------------------------
+st.sidebar.header("Symbol-Auswahl")
+symbol_source = st.sidebar.selectbox(
+    "Welche Symbol-Liste soll verwendet werden?",
+    ["Eigene Watchlist", "NASDAQ-100", "S&P500", "Gesamte NASDAQ"]
+)
 
-# ------------------------------------------------------
-# Utility: Daten holen
-# ------------------------------------------------------
-@st.cache_data(ttl=60)
-def get_data(symbol, period="1d", interval="1m"):
+symbols = []
+
+if symbol_source == "Eigene Watchlist":
+    symbols_input = st.sidebar.text_area("Symbole (Komma getrennt)", "AAPL,TSLA,AMD,NIO,PLTR")
+    symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+
+elif symbol_source == "NASDAQ-100":
     try:
-        data = yf.download(symbol, period=period, interval=interval, progress=False)
-        if data is None or data.empty:
-            return None
-        data = flatten_columns(data)
-        data.reset_index(inplace=True)
-        return data
+        df = pd.read_csv("https://datahub.io/core/nasdaq-100-companies/r/constituents.csv")
+        symbols = df["Symbol"].dropna().tolist()
+        st.sidebar.success(f"{len(symbols)} NASDAQ-100 Symbole geladen ✅")
+    except Exception as e:
+        st.sidebar.error(f"Fehler beim Laden: {e}")
+
+elif symbol_source == "S&P500":
+    try:
+        df = pd.read_csv("https://datahub.io/core/s-and-p-500-companies/r/constituents.csv")
+        symbols = df["Symbol"].dropna().tolist()
+        st.sidebar.success(f"{len(symbols)} S&P500 Symbole geladen ✅")
+    except Exception as e:
+        st.sidebar.error(f"Fehler beim Laden: {e}")
+
+elif symbol_source == "Gesamte NASDAQ":
+    try:
+        r = requests.get("https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv")
+        df = pd.read_csv(io.StringIO(r.text))
+        symbols = df["Symbol"].dropna().tolist()
+        st.sidebar.success(f"{len(symbols)} NASDAQ Symbole geladen ✅")
+    except Exception as e:
+        st.sidebar.error(f"Fehler beim Laden: {e}")
+
+# --------------------------
+# Scanner Einstellungen
+# --------------------------
+st.sidebar.header("Filter")
+lookback = st.sidebar.number_input("Lookback Perioden (für Volumen)", min_value=5, max_value=100, value=20)
+min_price = st.sidebar.number_input("Minimaler Preis ($)", min_value=0.0, value=2.0)
+max_price = st.sidebar.number_input("Maximaler Preis ($)", min_value=0.0, value=20.0)
+min_rvol = st.sidebar.number_input("Minimales RVOL (Relatives Volumen)", min_value=0.5, value=2.0)
+
+if st.sidebar.button("🔄 Daten neu laden"):
+    st.rerun()
+
+# --------------------------
+# Hilfsfunktion: robustes Spalten-Mapping
+# --------------------------
+def extract_columns(data, sym):
+    close = None
+    volume = None
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            if (sym, "Close") in data.columns:
+                close = data[(sym, "Close")]
+            elif ("Close", sym) in data.columns:
+                close = data[("Close", sym)]
+            elif ("Close",) in data.columns:
+                close = data[("Close",)]
+            elif "Close" in data.columns:
+                close = data["Close"]
+            elif "Adj Close" in data.columns:
+                close = data["Adj Close"]
+
+            if (sym, "Volume") in data.columns:
+                volume = data[(sym, "Volume")]
+            elif ("Volume", sym) in data.columns:
+                volume = data[("Volume", sym)]
+            elif ("Volume",) in data.columns:
+                volume = data[("Volume",)]
+            elif "Volume" in data.columns:
+                volume = data["Volume"]
+        else:
+            close = data.get("Close", data.get("Adj Close"))
+            volume = data.get("Volume")
     except Exception:
-        return None
+        pass
+    return close, volume
 
-# ------------------------------------------------------
-# Symbolquellen laden
-# ------------------------------------------------------
-@st.cache_data
-def load_symbol_lists():
-    sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-    nasdaq100 = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
-    return sp500["Symbol"].tolist(), nasdaq100["Ticker"].tolist()
+# --------------------------
+# Daten abrufen & Filtern
+# --------------------------
+results = []
 
-# ------------------------------------------------------
-# Scanner
-# ------------------------------------------------------
-def stock_scanner():
-    st.title("📊 Aktien-Scanner")
+if symbols:
+    end = datetime.now()
+    start = end - timedelta(days=7)
+    progress = st.progress(0)
+    st.sidebar.write(f"Scanne {len(symbols)} Symbole...")
 
-    st.write("Scanne Aktien mit hohem Volumenanstieg im Vergleich zum Durchschnitt der letzten 50 Minuten.")
+    for i, sym in enumerate(symbols):
+        try:
+            data = yf.download(sym, start=start, end=end, interval="1m", progress=False)
+            if data.empty:
+                data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
 
-    sp500_symbols, nasdaq_symbols = load_symbol_lists()
-
-    source = st.selectbox("Symbolquelle auswählen:", ["S&P 500", "NASDAQ 100", "Eigene Auswahl"])
-    if source == "S&P 500":
-        symbols = sp500_symbols
-    elif source == "NASDAQ 100":
-        symbols = nasdaq_symbols
-    else:
-        symbols = st.text_area("Eigene Symbole (kommagetrennt):", "AAPL,TSLA,AMD").replace(" ", "").split(",")
-
-    run_scan = st.button("🔍 Scan starten")
-
-    if run_scan:
-        st.info("⏳ Scan läuft... bitte warten.")
-        results = []
-
-        progress = st.progress(0)
-        total = len(symbols)
-
-        for i, sym in enumerate(symbols):
-            progress.progress((i + 1) / total)
-            data = get_data(sym)
-            if data is None or "Volume" not in data.columns or len(data) < 51:
+            if data.empty:
                 continue
 
-            data["AvgVol50"] = data["Volume"].rolling(window=50).mean()
-            data["RelVol"] = data["Volume"] / data["AvgVol50"]
+            close, volume = extract_columns(data, sym)
+            if close is None or volume is None:
+                continue
 
-            last = data.iloc[-1]
-            change = ((last["Close"] - data["Close"].iloc[-51]) / data["Close"].iloc[-51]) * 100
+            df = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
+            if df.empty:
+                continue
 
-            if last["RelVol"] > 2 and change > 5:
+            last_close = float(df["Close"].iloc[-1])
+            avg_vol = float(df["Volume"].iloc[-lookback:].mean())
+            current_vol = float(df["Volume"].iloc[-1])
+            rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
+
+            if min_price <= last_close <= max_price and rvol >= min_rvol:
                 results.append({
                     "Symbol": sym,
-                    "Rel. Volumen": round(last["RelVol"], 2),
-                    "Kursveränderung (%)": round(change, 2),
-                    "Letzter Preis": round(last["Close"], 2)
+                    "Preis": round(last_close, 2),
+                    "RVOL": round(rvol, 2),
+                    "Letztes Volumen": int(current_vol),
+                    "Ø Volumen": int(avg_vol)
                 })
 
-        progress.empty()
+        except Exception:
+            pass
 
-        if results:
-            df = pd.DataFrame(results).sort_values(by="Kursveränderung (%)", ascending=False)
-            st.dataframe(df, use_container_width=True)
-            st.session_state["monitor_symbols"] = df["Symbol"].tolist()
-            st.success(f"✅ {len(df)} Aktien gefunden. Monitoring aktiviert.")
-        else:
-            st.warning("Keine passenden Aktien gefunden.")
+        progress.progress((i + 1) / len(symbols))
 
-# ------------------------------------------------------
-# Monitoring
-# ------------------------------------------------------
-def monitor_page():
-    st.title("📈 Live Monitoring")
+# --------------------------
+# Ergebnisse anzeigen
+# --------------------------
+st.subheader("📊 Scan-Ergebnisse")
 
-    if "monitor_symbols" not in st.session_state or not st.session_state["monitor_symbols"]:
-        st.info("⚠️ Noch keine Symbole zum Beobachten. Bitte zuerst den Scanner nutzen.")
-        return
+if results:
+    df = pd.DataFrame(results).sort_values(by="RVOL", ascending=False)
+    st.write(f"Gefundene Treffer: **{len(df)}** von insgesamt {len(symbols)} gescannten Symbolen")
+    st.dataframe(df, use_container_width=True)
+    st.session_state["monitor_symbols"] = df["Symbol"].tolist()
+else:
+    st.warning(f"Keine Aktien erfüllen aktuell die Kriterien. Gescannt: {len(symbols)} Symbole.")
+    st.info("👉 Tipp: Filter lockern (z. B. RVOL auf 1.0 setzen oder Preisspanne erhöhen)")
 
-    symbols = st.session_state["monitor_symbols"]
+# ============================================================
+# 📈 MONITORING-FUNKTION – Echtzeitüberwachung der Treffer
+# ============================================================
+st.markdown("---")
+st.header("📡 Live Monitoring der gefundenen Aktien")
+
+if "monitor_symbols" not in st.session_state or not st.session_state["monitor_symbols"]:
+    st.info("⚠️ Noch keine Treffer vorhanden. Bitte zuerst den Scanner ausführen.")
+else:
+    monitor_symbols = st.session_state["monitor_symbols"]
     refresh_rate = st.slider("⏱ Aktualisierung alle (Sekunden):", 30, 300, 60)
-
-    st.write(f"Überwachte Symbole: {', '.join(symbols)}")
+    st.write(f"Aktuell überwachte Symbole: {', '.join(monitor_symbols)}")
 
     data_rows = []
-    for sym in symbols:
-        data = get_data(sym)
-        if data is None or len(data) < 2:
+    for sym in monitor_symbols:
+        try:
+            data = yf.download(sym, period="1d", interval="1m", progress=False)
+            if data is None or len(data) < 2:
+                continue
+            last, prev = data.iloc[-1], data.iloc[-2]
+            price_change = ((last["Close"] - prev["Close"]) / prev["Close"]) * 100
+            color = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪"
+            data_rows.append({
+                "Symbol": sym,
+                "Letzter Preis": round(last["Close"], 2),
+                "Veränderung (%)": round(price_change, 2),
+                "Volumen": int(last["Volume"]),
+                "Trend": color
+            })
+        except Exception:
             continue
-        last, prev = data.iloc[-1], data.iloc[-2]
-        price_change = ((last["Close"] - prev["Close"]) / prev["Close"]) * 100
-        color = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪"
-        data_rows.append({
-            "Symbol": sym,
-            "Letzter Preis": round(last["Close"], 2),
-            "Veränderung (%)": round(price_change, 2),
-            "Volumen": int(last["Volume"]),
-            "Trend": color
-        })
 
     if data_rows:
-        df = pd.DataFrame(data_rows)
-        st.dataframe(df, use_container_width=True)
+        dfm = pd.DataFrame(data_rows)
+        st.dataframe(dfm, use_container_width=True)
+        st.caption(f"Letztes Update: {datetime.now().strftime('%H:%M:%S')}")
     else:
-        st.warning("Keine Daten verfügbar.")
+        st.warning("Keine Monitoring-Daten verfügbar.")
 
-    st.caption(f"Letztes Update: {datetime.now().strftime('%H:%M:%S')}")
-    st.experimental_rerun() if st.button("🔄 Jetzt aktualisieren") else time.sleep(refresh_rate)
-
-# ------------------------------------------------------
-# Navigation
-# ------------------------------------------------------
-st.sidebar.title("📍 Navigation")
-page = st.sidebar.radio("Seite auswählen", ["🔍 Scanner", "📈 Monitoring"])
-
-if page == "🔍 Scanner":
-    stock_scanner()
-else:
-    monitor_page()
+    if st.button("🔄 Jetzt aktualisieren"):
+        st.experimental_rerun()
+    else:
+        time.sleep(refresh_rate)
+        st.experimental_rerun()
