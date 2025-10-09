@@ -1,203 +1,160 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-import io
-import time
 from datetime import datetime, timedelta
+import time
 
-# --------------------------
-# Seiteneinstellungen
-# --------------------------
-st.set_page_config(page_title="📈 Aktien Breakout Scanner", layout="wide")
-st.title("📊 Aktien Breakout Scanner (NASDAQ / S&P500)")
+st.set_page_config(page_title="Stock Scanner & Monitor", layout="wide")
 
-if "monitor_symbols" not in st.session_state:
-    st.session_state["monitor_symbols"] = []
-
-# --------------------------
-# Sidebar: Symbol-Quelle
-# --------------------------
-st.sidebar.header("Symbol-Auswahl")
-symbol_source = st.sidebar.selectbox(
-    "Welche Symbol-Liste soll verwendet werden?",
-    ["Eigene Watchlist", "NASDAQ-100", "S&P500", "Gesamte NASDAQ"]
-)
-
-symbols = []
-
-if symbol_source == "Eigene Watchlist":
-    symbols_input = st.sidebar.text_area("Symbole (Komma getrennt)", "AAPL,TSLA,AMD,NIO,PLTR")
-    symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
-
-elif symbol_source == "NASDAQ-100":
+# =========================================================
+# Symbol-Listen laden (S&P500 + NASDAQ)
+# =========================================================
+@st.cache_data
+def load_symbol_lists():
     try:
-        df = pd.read_csv("https://datahub.io/core/nasdaq-100-companies/r/constituents.csv")
-        symbols = df["Symbol"].dropna().tolist()
-        st.sidebar.success(f"{len(symbols)} NASDAQ-100 Symbole geladen ✅")
-    except Exception as e:
-        st.sidebar.error(f"Fehler beim Laden: {e}")
-
-elif symbol_source == "S&P500":
-    try:
-        df = pd.read_csv("https://datahub.io/core/s-and-p-500-companies/r/constituents.csv")
-        symbols = df["Symbol"].dropna().tolist()
-        st.sidebar.success(f"{len(symbols)} S&P500 Symbole geladen ✅")
-    except Exception as e:
-        st.sidebar.error(f"Fehler beim Laden: {e}")
-
-elif symbol_source == "Gesamte NASDAQ":
-    try:
-        r = requests.get("https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv")
-        df = pd.read_csv(io.StringIO(r.text))
-        symbols = df["Symbol"].dropna().tolist()
-        st.sidebar.success(f"{len(symbols)} NASDAQ Symbole geladen ✅")
-    except Exception as e:
-        st.sidebar.error(f"Fehler beim Laden: {e}")
-
-# --------------------------
-# Scanner Einstellungen
-# --------------------------
-st.sidebar.header("Filter")
-lookback = st.sidebar.number_input("Lookback Perioden (für Volumen)", min_value=5, max_value=100, value=20)
-min_price = st.sidebar.number_input("Minimaler Preis ($)", min_value=0.0, value=2.0)
-max_price = st.sidebar.number_input("Maximaler Preis ($)", min_value=0.0, value=20.0)
-min_rvol = st.sidebar.number_input("Minimales RVOL (Relatives Volumen)", min_value=0.5, value=2.0)
-
-if st.sidebar.button("🔄 Daten neu laden"):
-    st.rerun()
-
-# --------------------------
-# Hilfsfunktion: Spalten-Mapping
-# --------------------------
-def extract_columns(data, sym):
-    """Sucht Close- und Volume-Spalten robust."""
-    try:
-        if isinstance(data.columns, pd.MultiIndex):
-            close = data.get((sym, "Close"), data.get(("Close", sym), data.get("Close")))
-            volume = data.get((sym, "Volume"), data.get(("Volume", sym), data.get("Volume")))
-        else:
-            close = data.get("Close", data.get("Adj Close"))
-            volume = data.get("Volume")
-        return close, volume
+        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        nasdaq = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[0]
+        sp500_symbols = sp500["Symbol"].to_list()
+        nasdaq_symbols = nasdaq["Ticker"].to_list()
     except Exception:
-        return None, None
+        sp500_symbols, nasdaq_symbols = [], []
+    return sp500_symbols, nasdaq_symbols
 
-# --------------------------
-# Scan durchführen
-# --------------------------
-results = []
-if symbols:
-    end = datetime.now()
-    start = end - timedelta(days=7)
-    progress = st.progress(0)
-    st.sidebar.write(f"Scanne {len(symbols)} Symbole...")
 
-    for i, sym in enumerate(symbols):
-        try:
-            data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
-            if data.empty:
-                continue
+# =========================================================
+# Daten abrufen
+# =========================================================
+def get_data(symbol, days=5):
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        data = yf.download(symbol, start=start, end=end, interval="1d", progress=False)
+        if data.empty:
+            return None
 
-            close, volume = extract_columns(data, sym)
-            if close is None or volume is None:
-                continue
+        data["RelVol"] = data["Volume"] / data["Volume"].rolling(50).mean()
+        data["Δ%"] = (data["Close"] - data["Open"]) / data["Open"] * 100
+        return data.iloc[-1]
+    except Exception:
+        return None
 
-            df = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
-            if df.empty:
-                continue
 
-            last_close = float(df["Close"].iloc[-1])
-            avg_vol = float(df["Volume"].iloc[-lookback:].mean())
-            current_vol = float(df["Volume"].iloc[-1])
-            rvol = current_vol / avg_vol if avg_vol > 0 else 0.0
-
-            if min_price <= last_close <= max_price and rvol >= min_rvol:
-                results.append({
-                    "Symbol": sym,
-                    "Preis": round(last_close, 2),
-                    "RVOL": round(rvol, 2),
-                    "Letztes Volumen": int(current_vol),
-                    "Ø Volumen": int(avg_vol)
-                })
-
-        except Exception:
+# =========================================================
+# Symbol-Scanner
+# =========================================================
+def symbol_scanner(symbols, min_price, max_price, min_relvol):
+    found = []
+    for sym in symbols:
+        data = get_data(sym)
+        if data is None:
             continue
+        if (
+            min_price <= data["Close"] <= max_price
+            and data["RelVol"] >= min_relvol
+        ):
+            found.append({
+                "Symbol": sym,
+                "Close": round(data["Close"], 2),
+                "Δ%": round(data["Δ%"], 2),
+                "RelVol": round(data["RelVol"], 2)
+            })
+    return found
 
-        progress.progress((i + 1) / len(symbols))
 
-# --------------------------
-# Ergebnisse anzeigen
-# --------------------------
-st.subheader("📊 Scan-Ergebnisse")
+# =========================================================
+# App-Layout
+# =========================================================
+def main():
+    st.title("📊 Realtime Stock Scanner & Monitor")
 
-if results:
-    df = pd.DataFrame(results).sort_values(by="RVOL", ascending=False)
-    st.write(f"Gefundene Treffer: **{len(df)}** von {len(symbols)} Symbolen")
-    st.dataframe(df, use_container_width=True)
+    tab1, tab2 = st.tabs(["🔍 Scanner", "🖥️ Monitor"])
 
-    # Symbol hinzufügen zum Monitor
-    add_symbol = st.selectbox("➡️ Symbol zum Monitor hinzufügen", ["–"] + df["Symbol"].tolist())
-    if add_symbol != "–":
-        if add_symbol not in st.session_state["monitor_symbols"]:
-            st.session_state["monitor_symbols"].append(add_symbol)
-            st.success(f"{add_symbol} wurde dem Monitor hinzugefügt ✅")
-else:
-    st.warning("Keine Aktien erfüllen aktuell die Kriterien.")
+    sp500_symbols, nasdaq_symbols = load_symbol_lists()
+    all_symbols = sorted(list(set(sp500_symbols + nasdaq_symbols)))
 
-# --------------------------
-# Monitor
-# --------------------------
-st.subheader("📺 Live Monitor")
+    # ------------------ TAB 1: SCANNER ------------------
+    with tab1:
+        st.header("🔎 Symbol-Scanner")
 
-col1, col2 = st.columns([3, 1])
-with col2:
-    manual_symbol = st.text_input("Manuell Symbol hinzufügen (z. B. NVDA)")
-    if st.button("➕ Symbol hinzufügen"):
-        if manual_symbol and manual_symbol.upper() not in st.session_state["monitor_symbols"]:
-            st.session_state["monitor_symbols"].append(manual_symbol.upper())
-            st.success(f"{manual_symbol.upper()} hinzugefügt ✅")
+        min_price = st.number_input("Minimaler Preis", 0.0, 10000.0, 5.0)
+        max_price = st.number_input("Maximaler Preis", 0.0, 10000.0, 200.0)
+        min_relvol = st.number_input("Min. Relatives Volumen", 0.0, 50.0, 1.5)
 
-if not st.session_state["monitor_symbols"]:
-    st.info("Noch keine Symbole im Monitor. Füge welche hinzu aus den Scan-Ergebnissen oder manuell.")
-else:
-    refresh_rate = st.sidebar.number_input("⏱️ Aktualisierungsrate (Sekunden)", min_value=10, max_value=300, value=60)
-    data_list = []
+        if st.button("🚀 Scan starten"):
+            with st.spinner("Scanne Märkte..."):
+                found = symbol_scanner(all_symbols, min_price, max_price, min_relvol)
 
-    for sym in st.session_state["monitor_symbols"]:
-        try:
-            data = yf.download(sym, period="1d", interval="1m", progress=False)
-            if data is not None and not data.empty:
-                last = data["Close"].iloc[-1]
-                prev = data["Close"].iloc[-2] if len(data) > 1 else last
-                delta = ((last - prev) / prev) * 100 if prev != 0 else 0
-                data_list.append({
-                    "Symbol": sym,
-                    "Kurs": round(float(last), 2),
-                    "Δ%": round(float(delta), 2)
-                })
-        except Exception as e:
-            st.write(f"{sym}: ❌ Fehler ({str(e)[:50]})")
+            if len(found) > 0:
+                df = pd.DataFrame(found)
+                st.success(f"{len(df)} Symbole gefunden!")
+                st.dataframe(df.sort_values(by="Δ%", ascending=False), use_container_width=True)
+            else:
+                st.warning("Keine Symbole gefunden. Passe deine Filter an.")
 
-    if len(data_list) > 0:
-        dfm = pd.DataFrame(data_list).sort_values(by="Δ%", ascending=False)
+    # ------------------ TAB 2: MONITOR ------------------
+    with tab2:
+        st.header("🖥️ Live-Monitor")
 
-        def color_change(val):
-            try:
-                val = float(val)
-                if val > 0:
-                    return "background-color: rgba(0,255,0,0.2); color: green;"
-                elif val < 0:
-                    return "background-color: rgba(255,0,0,0.2); color: red;"
-                else:
-                    return "color: gray;"
-            except Exception:
-                return "color: gray;"
+        if "monitor_symbols" not in st.session_state:
+            st.session_state.monitor_symbols = []
 
-        st.dataframe(dfm.style.applymap(color_change, subset=["Δ%"]), width="stretch")
-        st.caption(f"🔄 Aktualisierung alle {refresh_rate} Sekunden – Stand: {datetime.now().strftime('%H:%M:%S')}")
-    else:
-        st.warning("Keine Kursdaten für die überwachten Symbole gefunden.")
+        # Eingabefeld zum Hinzufügen
+        new_symbol = st.text_input("Symbol hinzufügen (z. B. AAPL, MSFT):").upper()
+        if st.button("➕ Hinzufügen"):
+            if new_symbol and new_symbol not in st.session_state.monitor_symbols:
+                st.session_state.monitor_symbols.append(new_symbol)
+            else:
+                st.info("Symbol bereits vorhanden oder ungültig.")
 
-    time.sleep(refresh_rate)
-    st.rerun()
+        if st.session_state.monitor_symbols:
+            refresh_rate = st.slider("⏱️ Aktualisierungsrate (Sekunden)", 10, 300, 60)
+            st.write("Aktive Symbole:", ", ".join(st.session_state.monitor_symbols))
+
+            data_list = []
+            for sym in st.session_state.monitor_symbols:
+                data = get_data(sym, days=2)
+                if data is not None:
+                    data_list.append({
+                        "Symbol": sym,
+                        "Kurs": round(data["Close"], 2),
+                        "Δ%": round(data["Δ%"], 2),
+                        "RelVol": round(data["RelVol"], 2)
+                    })
+
+            if len(data_list) > 0:
+                dfm = pd.DataFrame.from_records(data_list)
+                dfm = dfm.sort_values(by="Δ%", ascending=False)
+
+                # --- Heatmap ---
+                def color_change(val):
+                    try:
+                        v = float(val)
+                        if v > 0:
+                            return "background-color: rgba(0,255,0,0.15); color: green;"
+                        elif v < 0:
+                            return "background-color: rgba(255,0,0,0.15); color: red;"
+                        else:
+                            return "color: gray;"
+                    except Exception:
+                        return "color: gray;"
+
+                st.dataframe(
+                    dfm.style.applymap(color_change, subset=["Δ%"]),
+                    use_container_width=True,
+                )
+                st.caption(f"🔄 Aktualisierung alle {refresh_rate}s – Stand: {datetime.now().strftime('%H:%M:%S')}")
+
+                time.sleep(refresh_rate)
+                st.rerun()
+
+            else:
+                st.warning("Keine Kursdaten für die überwachten Symbole gefunden.")
+        else:
+            st.info("Füge Symbole hinzu, um den Monitor zu starten.")
+
+
+# =========================================================
+# Start
+# =========================================================
+if __name__ == "__main__":
+    main()
