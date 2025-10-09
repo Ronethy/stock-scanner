@@ -7,16 +7,13 @@ import time
 from datetime import datetime, timedelta
 
 # --------------------------
-# App Setup
+# Seiteneinstellungen
 # --------------------------
 st.set_page_config(page_title="📈 Aktien Breakout Scanner", layout="wide")
 st.title("📊 Aktien Breakout Scanner (NASDAQ / S&P500)")
 
-# Session-State initialisieren
 if "monitor_symbols" not in st.session_state:
     st.session_state["monitor_symbols"] = []
-if "scan_results" not in st.session_state:
-    st.session_state["scan_results"] = []
 
 # --------------------------
 # Sidebar: Symbol-Quelle
@@ -67,24 +64,49 @@ min_price = st.sidebar.number_input("Minimaler Preis ($)", min_value=0.0, value=
 max_price = st.sidebar.number_input("Maximaler Preis ($)", min_value=0.0, value=20.0)
 min_rvol = st.sidebar.number_input("Minimales RVOL (Relatives Volumen)", min_value=0.5, value=2.0)
 
-if st.sidebar.button("🔄 Scan starten"):
-    results = []
+if st.sidebar.button("🔄 Daten neu laden"):
+    st.rerun()
+
+# --------------------------
+# Hilfsfunktion: Spalten-Mapping
+# --------------------------
+def extract_columns(data, sym):
+    """Sucht Close- und Volume-Spalten robust."""
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            close = data.get((sym, "Close"), data.get(("Close", sym), data.get("Close")))
+            volume = data.get((sym, "Volume"), data.get(("Volume", sym), data.get("Volume")))
+        else:
+            close = data.get("Close", data.get("Adj Close"))
+            volume = data.get("Volume")
+        return close, volume
+    except Exception:
+        return None, None
+
+# --------------------------
+# Scan durchführen
+# --------------------------
+results = []
+if symbols:
     end = datetime.now()
     start = end - timedelta(days=7)
     progress = st.progress(0)
+    st.sidebar.write(f"Scanne {len(symbols)} Symbole...")
 
     for i, sym in enumerate(symbols):
         try:
-            data = yf.download(sym, start=start, end=end, interval="1h", progress=False)
+            data = yf.download(sym, start=start, end=end, interval="5m", progress=False)
             if data.empty:
                 continue
 
-            close = data.get("Close", data.get("Adj Close"))
-            volume = data.get("Volume")
+            close, volume = extract_columns(data, sym)
             if close is None or volume is None:
                 continue
 
             df = pd.DataFrame({"Close": close, "Volume": volume}).dropna()
+            if df.empty:
+                continue
+
             last_close = float(df["Close"].iloc[-1])
             avg_vol = float(df["Volume"].iloc[-lookback:].mean())
             current_vol = float(df["Volume"].iloc[-1])
@@ -99,35 +121,29 @@ if st.sidebar.button("🔄 Scan starten"):
                     "Ø Volumen": int(avg_vol)
                 })
 
-        except Exception as e:
-            st.sidebar.write(f"{sym}: ❌ Fehler ({str(e)[:60]})")
+        except Exception:
+            continue
 
         progress.progress((i + 1) / len(symbols))
 
-    st.session_state["scan_results"] = results
-    st.success(f"✅ Scan abgeschlossen – {len(results)} Treffer gefunden.")
-
 # --------------------------
-# Scan-Ergebnisse anzeigen
+# Ergebnisse anzeigen
 # --------------------------
 st.subheader("📊 Scan-Ergebnisse")
 
-results = st.session_state.get("scan_results", [])
-
 if results:
     df = pd.DataFrame(results).sort_values(by="RVOL", ascending=False)
-    st.dataframe(df, width="stretch")
+    st.write(f"Gefundene Treffer: **{len(df)}** von {len(symbols)} Symbolen")
+    st.dataframe(df, use_container_width=True)
 
-    selected = st.multiselect("Symbole zum Monitor hinzufügen", df["Symbol"].tolist())
-
-    if st.button("📈 Zum Monitor hinzufügen"):
-        for s in selected:
-            if s not in st.session_state["monitor_symbols"]:
-                st.session_state["monitor_symbols"].append(s)
-        st.success(f"{len(selected)} Symbole wurden dem Monitor hinzugefügt ✅")
-
+    # Symbol hinzufügen zum Monitor
+    add_symbol = st.selectbox("➡️ Symbol zum Monitor hinzufügen", ["–"] + df["Symbol"].tolist())
+    if add_symbol != "–":
+        if add_symbol not in st.session_state["monitor_symbols"]:
+            st.session_state["monitor_symbols"].append(add_symbol)
+            st.success(f"{add_symbol} wurde dem Monitor hinzugefügt ✅")
 else:
-    st.info("👉 Führe einen Scan durch, um Ergebnisse zu sehen.")
+    st.warning("Keine Aktien erfüllen aktuell die Kriterien.")
 
 # --------------------------
 # Monitor
@@ -151,16 +167,20 @@ else:
     for sym in st.session_state["monitor_symbols"]:
         try:
             data = yf.download(sym, period="1d", interval="1m", progress=False)
-            if not data.empty:
+            if data is not None and not data.empty:
                 last = data["Close"].iloc[-1]
                 prev = data["Close"].iloc[-2] if len(data) > 1 else last
                 delta = ((last - prev) / prev) * 100 if prev != 0 else 0
-                data_list.append({"Symbol": sym, "Kurs": round(last, 2), "Δ%": round(delta, 2)})
+                data_list.append({
+                    "Symbol": sym,
+                    "Kurs": round(float(last), 2),
+                    "Δ%": round(float(delta), 2)
+                })
         except Exception as e:
             st.write(f"{sym}: ❌ Fehler ({str(e)[:50]})")
 
-    if data_list:
-        dfm = pd.DataFrame(data_list)
+    if len(data_list) > 0:
+        dfm = pd.DataFrame(data_list).sort_values(by="Δ%", ascending=False)
 
         def color_change(val):
             try:
@@ -176,6 +196,8 @@ else:
 
         st.dataframe(dfm.style.applymap(color_change, subset=["Δ%"]), width="stretch")
         st.caption(f"🔄 Aktualisierung alle {refresh_rate} Sekunden – Stand: {datetime.now().strftime('%H:%M:%S')}")
+    else:
+        st.warning("Keine Kursdaten für die überwachten Symbole gefunden.")
 
-        time.sleep(refresh_rate)
-        st.rerun()
+    time.sleep(refresh_rate)
+    st.rerun()
